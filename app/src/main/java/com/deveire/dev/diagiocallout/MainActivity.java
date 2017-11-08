@@ -1,20 +1,54 @@
 package com.deveire.dev.diagiocallout;
 
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.IntentSender;
+import android.content.pm.PackageManager;
+import android.location.Geocoder;
+import android.location.Location;
+import android.location.LocationListener;
+import android.media.AudioManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.ResultReceiver;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
+import android.support.v4.app.FragmentActivity;
+import android.support.v4.content.ContextCompat;
+import android.support.v4.media.session.MediaButtonReceiver;
+import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.TimeFormatException;
+import android.view.KeyEvent;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
+
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.PendingResult;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.common.api.Status;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.LocationSettingsRequest;
+import com.google.android.gms.location.LocationSettingsResult;
+import com.google.android.gms.location.LocationSettingsStates;
+import com.google.android.gms.location.LocationSettingsStatusCodes;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -24,16 +58,18 @@ import java.util.Calendar;
 import java.util.HashMap;
 import java.util.Locale;
 
-public class MainActivity extends AppCompatActivity implements RecognitionListener
+public class MainActivity extends FragmentActivity implements com.google.android.gms.location.LocationListener, GoogleApiClient.OnConnectionFailedListener, GoogleApiClient.ConnectionCallbacks, RecognitionListener
 {
-
 
     private TextView kegText;
     private Button demoHeadsetButton;
 
     private Calendar aCalendar;
     private SimpleDateFormat aDateFormat;
-    
+
+    double currentLat;
+    double currentLon;
+
 
     //[Text To Speech Variables]
     private TextToSpeech toSpeech;
@@ -57,12 +93,85 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
 
     private String[] currentPossiblePhrasesNeedingClarification;
 
+    //++++[Location Variables]
+        private GoogleApiClient mGoogleApiClient;
+        private Location locationReceivedFromLocationUpdates;
+        private Location userLocation;
+        private MainActivity.AddressResultReceiver geoCoderServiceResultReciever;
+        private int locationScanInterval;
+
+        LocationRequest request;
+        private final int SETTINGS_REQUEST_ID = 8888;
+        private final String SAVED_LOCATION_KEY = "79";
+    //+++++[/Location Variables]
 
     @Override
     protected void onCreate(Bundle savedInstanceState)
     {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        //[Location Setup]
+        mGoogleApiClient = new GoogleApiClient.Builder(this)
+                .addConnectionCallbacks(this)
+                .addOnConnectionFailedListener(this)
+                .addApi(LocationServices.API)
+                .build();
+
+        mGoogleApiClient.connect();
+
+        locationScanInterval = 60;//in seconds
+
+
+        request = new LocationRequest();
+        request.setInterval(locationScanInterval * 1000);//in mileseconds
+        request.setFastestInterval(5000);//caps how fast the locations are recieved, as other apps could be triggering updates faster than our app.
+        request.setPriority(LocationRequest.PRIORITY_BALANCED_POWER_ACCURACY); //accurate to 100 meters.
+
+        LocationSettingsRequest.Builder requestBuilder = new LocationSettingsRequest.Builder().addLocationRequest(request);
+
+        PendingResult<LocationSettingsResult> result =
+                LocationServices.SettingsApi.checkLocationSettings(mGoogleApiClient,
+                        requestBuilder.build());
+
+        result.setResultCallback(new ResultCallback<LocationSettingsResult>()
+        {
+            @Override
+            public void onResult(@NonNull LocationSettingsResult aResult)
+            {
+                final Status status = aResult.getStatus();
+                final LocationSettingsStates states = aResult.getLocationSettingsStates();
+                switch (status.getStatusCode())
+                {
+                    case LocationSettingsStatusCodes.SUCCESS:
+                        // All location settings are satisfied. The client can
+                        // initialize location requests here.
+
+                        break;
+                    case LocationSettingsStatusCodes.RESOLUTION_REQUIRED:
+                        // Location settings are not satisfied, but this can be fixed
+                        // by showing the user a dialog.
+                        try
+                        {
+                            // Show the dialog by calling startResolutionForResult(),
+                            // and check the result in onActivityResult().
+                            status.startResolutionForResult(MainActivity.this, SETTINGS_REQUEST_ID);
+                        } catch (IntentSender.SendIntentException e)
+                        {
+                            // Ignore the error.
+                        }
+                        break;
+                    case LocationSettingsStatusCodes.SETTINGS_CHANGE_UNAVAILABLE:
+                        // Location settings are not satisfied. However, we have no way
+                        // to fix the settings so we won't show the dialog.
+                        break;
+                }
+            }
+        });
+
+        geoCoderServiceResultReciever = new MainActivity.AddressResultReceiver(new Handler());
+        //[/Location Setup]
+
 
 
         kegText = (TextView) findViewById(R.id.kegText);
@@ -80,7 +189,9 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
         });
 
 
-
+        currentKegNumber = 0;
+        currentLat = 0;
+        currentLon = 0;
 
         recog = SpeechRecognizer.createSpeechRecognizer(getApplicationContext());
         recog.setRecognitionListener(this);
@@ -97,6 +208,8 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
 
         aCalendar = Calendar.getInstance();
         aDateFormat = new SimpleDateFormat("hh:mm:ss dd/MM/yyyy");
+
+
     }
 
     @Override
@@ -444,10 +557,10 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
                 case pingingRecogFor_Confirmation:
 
                     Log.i("Recog", "onResult for Confirmation");
-                    phrases = new String[]{"yes", "no"};
+                    phrases = new String[]{"yes", "that is correct", "ok", "right", "thats right", "no"};
                     response = sortThroughRecognizerResults(matches, phrases);
                     Log.i("Recog", "onConfirmation: Response= " + response);
-                    if (response.matches("yes"))
+                    if (response.matches("yes") || response.matches("that is correct") || response.matches("ok") || response.matches("right") || response.matches("thats right"))
                     {
                         toSpeech.speak("Number Confirmed. What is the kegs status?", TextToSpeech.QUEUE_FLUSH, null, "AskForStatus");
                     }
@@ -459,10 +572,10 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
 
                 case pingingRecogFor_KegStatus:
                     Log.i("Recog", "onResult for KegStatus");
-                    phrases = new String[]{"dropping off", "picking up", "damaged"};
+                    phrases = new String[]{"dropping off", "drop off", "dropped off", "picked up", "pickup", "picking up", "damaged"};
                     response = sortThroughRecognizerResults(matches, phrases);
                     Log.i("Recog", "onConfirmation: Response= " + response);
-                    if (response.matches("dropping off"))
+                    if (response.matches("dropping off") || response.matches("dropped off") || response.matches("drop off"))
                     {
                         Log.i("Recog", "Keg " + currentKegNumber + " dropped off.");
                         runOnUiThread(new Runnable()
@@ -470,12 +583,12 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
                             @Override
                             public void run()
                             {
-                                kegText.setText("Keg " + currentKegNumber + " dropped off at" + aDateFormat.format(aCalendar.getTime()));
+                                kegText.setText("Keg " + currentKegNumber + " dropped off at \n(" + currentLat + "^, " + currentLon + "^) at \n" + aDateFormat.format(aCalendar.getTime()));
                             }
                         });
 
                     }
-                    else if(response.matches("picking up"))
+                    else if(response.matches("picking up") || response.matches("picked up") || response.matches("pickup"))
                     {
                         Log.i("Recog", "Keg " + currentKegNumber + " picking up.");
                         runOnUiThread(new Runnable()
@@ -483,7 +596,7 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
                             @Override
                             public void run()
                             {
-                                kegText.setText("Keg " + currentKegNumber + " picked up at " + aDateFormat.format(aCalendar.getTime()));
+                                kegText.setText("Keg " + currentKegNumber + " picked up at \n(" + currentLat + "^, " + currentLon + "^) at \n" + aDateFormat.format(aCalendar.getTime()));
                             }
                         });
                     }
@@ -495,7 +608,7 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
                             @Override
                             public void run()
                             {
-                                kegText.setText("Keg " + currentKegNumber + " reported damaged at " + aDateFormat.format(aCalendar.getTime()));
+                                kegText.setText("Keg " + currentKegNumber + " reported damaged at \n(" + currentLat + "^, " + currentLon + "^) at \n" + aDateFormat.format(aCalendar.getTime()));
                             }
                         });
                     }
@@ -505,4 +618,165 @@ public class MainActivity extends AppCompatActivity implements RecognitionListen
         }
     }
 //++++++++[/Recognition Other Code]
+
+
+//++++++++[Location Code]
+//**********[Location Update and server pinging Code]
+    @Override
+    public void onConnectionFailed(ConnectionResult result)
+    {
+    // An unresolvable error has occurred and a connection to Google APIs
+    // could not be established. Display an error message, or handle
+    // the failure silently
+
+    // ...
+    }
+
+    @Override
+    public void onConnected(@Nullable Bundle bundle)
+    {
+        if(ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+        {
+            locationReceivedFromLocationUpdates = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
+            LocationServices.FusedLocationApi.requestLocationUpdates(mGoogleApiClient, request, this);
+            if(locationReceivedFromLocationUpdates != null)
+            {
+                //YES, lat and long are multi digit.
+                if(Geocoder.isPresent())
+                {
+                    startIntentService();
+                }
+                else
+                {
+                    Log.e("ERROR:", "Geocoder is not avaiable");
+                }
+            }
+            else
+            {
+
+            }
+
+
+        }
+
+
+
+    }
+
+    @Override
+    public void onConnectionSuspended(int i)
+    {
+        //put other stuff here
+    }
+
+    //update app based on the new location data, and then begin pinging servlet with the new location
+    @Override
+    public void onLocationChanged(Location location)
+    {
+        locationReceivedFromLocationUpdates = location;
+        userLocation = locationReceivedFromLocationUpdates;
+        //locationReceivedFromLocationUpdates = fakeUserLocation;
+
+
+        if(locationReceivedFromLocationUpdates != null)
+        {
+            //startDownload();
+            currentLat = userLocation.getLatitude();
+            currentLon = userLocation.getLongitude();
+        }
+        else
+        {
+
+            Log.e("ERROR", "Unable to send location to sevrver, current location = null");
+        }
+
+    }
+
+    @Override
+    public void onSaveInstanceState(Bundle savedState)
+    {
+        savedState.putParcelable(SAVED_LOCATION_KEY, locationReceivedFromLocationUpdates);
+        super.onSaveInstanceState(savedState);
+    }
+
+    private void restoreSavedValues(Bundle savedInstanceState)
+    {
+        if (savedInstanceState != null)
+        {
+
+            // Update the value of mCurrentLocation from the Bundle and update the
+            // UI to show the correct latitude and longitude.
+            if (savedInstanceState.keySet().contains(SAVED_LOCATION_KEY))
+            {
+                // Since LOCATION_KEY was found in the Bundle, we can be sure that
+                // mCurrentLocationis not null.
+                locationReceivedFromLocationUpdates = savedInstanceState.getParcelable(SAVED_LOCATION_KEY);
+            }
+
+        }
+    }
+
+    protected void startIntentService()
+    {
+        Intent intent = new Intent(this, geoCoderIntent.class);
+        intent.putExtra(Constants.RECEIVER, geoCoderServiceResultReciever);
+        intent.putExtra(Constants.LOCATION_DATA_EXTRA, locationReceivedFromLocationUpdates);
+        startService(intent);
+    }
+
+class AddressResultReceiver extends ResultReceiver
+{
+    public AddressResultReceiver(Handler handler) {
+        super(handler);
+    }
+
+    @Override
+    protected void onReceiveResult(int resultCode, Bundle resultData) {
+
+        // Display the address string
+        // or an error message sent from the intent service.
+        resultData.getString(Constants.RESULT_DATA_KEY);
+
+
+        // Show a toast message if an address was found.
+        if (resultCode == Constants.SUCCESS_RESULT)
+        {
+            Log.i("Success", "Address found");
+        }
+        else
+        {
+            Log.e("Network Error:", "in OnReceiveResult in AddressResultReceiver: " +  resultData.getString(Constants.RESULT_DATA_KEY));
+        }
+
+    }
+}
+//++++++++[/Location Code]
+
+//++++++++[Headset Button Code]
+@Override
+public boolean onKeyDown(int keyCode, KeyEvent event) {
+    Log.i("HeadsetButton", "Button Pressed: " + keyCode);
+
+
+    switch (keyCode) {
+        case KeyEvent.KEYCODE_HEADSETHOOK:
+            Log.i("HeadsetButton", "Headset Button Pressed");
+            demoHeadsetButton.callOnClick();
+            return true;
+
+        case KeyEvent.KEYCODE_MEDIA_PLAY:
+            Log.i("HeadsetButton", "Headset Button Pressed");
+            demoHeadsetButton.callOnClick();
+            return true;
+
+        case KeyEvent.KEYCODE_MEDIA_PAUSE:
+            Log.i("HeadsetButton", "Headset Button Pressed");
+            demoHeadsetButton.callOnClick();
+            return true;
+    }
+    return super.onKeyDown(keyCode, event);
+}
+
+
+//++++++++[/Headset Button Code]
 }
